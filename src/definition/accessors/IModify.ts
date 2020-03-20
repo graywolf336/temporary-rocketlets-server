@@ -1,3 +1,4 @@
+import { IConfigurationModify } from './IConfigurationModify';
 import { IModifyCreator } from './IModifyCreator';
 import { IModifyExtender } from './IModifyExtender';
 import { IModifyUpdater } from './IModifyUpdater';
@@ -10,6 +11,8 @@ export interface IModify {
     getExtender(): IModifyExtender;
 
     getUpdater(): IModifyUpdater;
+
+    getConfiguration(): IConfigurationModify;
 
     /**
      * Gets the accessor for sending notifications to a user or users in a room.

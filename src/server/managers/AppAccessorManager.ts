@@ -24,6 +24,8 @@ import {
     PersistenceRead,
     Reader,
     RoomRead,
+    SchedulerExtend,
+    SchedulerRead,
     ServerSettingRead,
     ServerSettingsModify,
     SettingRead,
@@ -84,8 +86,9 @@ export class AppAccessorManager {
             const cmds = new SlashCommandsExtend(this.manager.getCommandManager(), appId);
             const apis = new ApiExtend(this.manager.getApiManager(), appId);
             const sets = new SettingsExtend(rl);
+            const sch = new SchedulerExtend(appId);
 
-            this.configExtenders.set(appId, new ConfigurationExtend(htt, sets, cmds, apis));
+            this.configExtenders.set(appId, new ConfigurationExtend(htt, sets, cmds, apis, sch));
         }
 
         return this.configExtenders.get(appId);
@@ -130,8 +133,9 @@ export class AppAccessorManager {
             const noti = new Notifier(this.bridges.getMessageBridge(), appId);
             const livechat = new LivechatRead(this.bridges.getLivechatBridge(), appId);
             const upload = new UploadRead(this.bridges.getUploadBridge(), appId);
+            const schedule = new SchedulerRead(appId);
 
-            this.readers.set(appId, new Reader(env, msg, persist, room, user, noti, livechat, upload));
+            this.readers.set(appId, new Reader(env, msg, persist, room, user, noti, livechat, upload, schedule));
         }
 
         return this.readers.get(appId);
@@ -139,7 +143,9 @@ export class AppAccessorManager {
 
     public getModifier(appId: string): IModify {
         if (!this.modifiers.has(appId)) {
-            this.modifiers.set(appId, new Modify(this.bridges, appId));
+            const config = this.getConfigurationModify(appId);
+
+            this.modifiers.set(appId, new Modify(this.bridges, config, appId));
         }
 
         return this.modifiers.get(appId);
