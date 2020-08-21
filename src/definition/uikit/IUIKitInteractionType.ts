@@ -4,6 +4,7 @@ export enum UIKitInteractionType {
     MODAL_OPEN = 'modal.open',
     MODAL_CLOSE = 'modal.close',
     MODAL_UPDATE = 'modal.update',
+    CONTEXTUAL_BAR_OPEN = 'contextual-bar.open',
     ERRORS = 'errors',
 }
 
@@ -28,5 +29,11 @@ export interface IUIKitModalInteraction extends IUIKitInteraction {
     view: IUIKitView;
 }
 
+export interface IUIKitContextualBarInteraction extends IUIKitInteraction {
+    type: UIKitInteractionType.CONTEXTUAL_BAR_OPEN;
+    view: IUIKitView;
+}
+
 export interface IUIKitModalResponse extends IUIKitModalInteraction, IUIKitResponse { }
+export interface IUIKitContextualBarResponse extends IUIKitContextualBarInteraction, IUIKitResponse { }
 export interface IUIKitErrorResponse extends IUIKitErrorInteraction, IUIKitResponse { }
