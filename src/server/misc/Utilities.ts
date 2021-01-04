@@ -3,10 +3,19 @@ import * as path from 'path';
 import * as vm from 'vm';
 
 enum AllowedInternalModules {
-    path,
-    url,
-    crypto,
+    assert,
+    async_hooks,
     buffer,
+    crypto,
+    dns,
+    path,
+    querystring,
+    readline,
+    stream,
+    string_decoder,
+    timers,
+    util,
+    url,
 }
 
 export class Utilities {
