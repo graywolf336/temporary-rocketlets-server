@@ -132,6 +132,7 @@ export class AppManager {
         return this.commandManager;
     }
 
+    /** Gets the license manager's instance. */
     public getLicenseManager(): AppLicenseManager {
         return this.licenseManager;
     }
