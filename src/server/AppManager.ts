@@ -4,7 +4,7 @@ import { IPermission } from '../definition/permissions/IPermission';
 import { IUser, UserType } from '../definition/users';
 import { AppBridges, PersistenceBridge, UserBridge } from './bridges';
 import { IInternalPersistenceBridge } from './bridges/IInternalPersistenceBridge';
-import {IInternalUserBridge} from './bridges/IInternalUserBridge';
+import { IInternalUserBridge } from './bridges/IInternalUserBridge';
 import { AppCompiler, AppFabricationFulfillment, AppPackageParser } from './compiler';
 import { InvalidLicenseError } from './errors';
 import { IGetAppsFilter } from './IGetAppsFilter';
@@ -14,9 +14,11 @@ import {
 } from './managers';
 import { IMarketplaceInfo } from './marketplace';
 import { DisabledApp } from './misc/DisabledApp';
+import { Utilities } from './misc/Utilities';
 import { defaultPermissions } from './permissions/AppPermissions';
 import { ProxiedApp } from './ProxiedApp';
-import { AppLogStorage, AppStorage, IAppStorageItem } from './storage';
+import { AppLogStorage, AppMetadataStorage, IAppSourceItem, IAppStorageItem } from './storage';
+import { AppSourceStorage } from './storage/AppSourceStorage';
 
 export interface IAppInstallParameters {
     enable: boolean;
@@ -29,12 +31,20 @@ export interface IAppUninstallParameters {
     user: IUser;
 }
 
+export interface IAppManagerDeps {
+    metadataStorage: AppMetadataStorage;
+    logStorage: AppLogStorage;
+    bridges: AppBridges;
+    sourceStorage: AppSourceStorage;
+}
+
 export class AppManager {
     public static Instance: AppManager;
 
     // apps contains all of the Apps
     private readonly apps: Map<string, ProxiedApp>;
-    private readonly storage: AppStorage;
+    private readonly appMetadataStorage: AppMetadataStorage;
+    private readonly appSourceStorage: AppSourceStorage;
     private readonly logStorage: AppLogStorage;
     private readonly bridges: AppBridges;
     private readonly parser: AppPackageParser;
@@ -51,28 +61,34 @@ export class AppManager {
 
     private isLoaded: boolean;
 
-    constructor(rlStorage: AppStorage, logStorage: AppLogStorage, rlBridges: AppBridges) {
+    constructor({ metadataStorage, logStorage, bridges, sourceStorage }: IAppManagerDeps) {
         // Singleton style. There can only ever be one AppManager instance
         if (typeof AppManager.Instance !== 'undefined') {
-            throw new Error('There is already a valid AppManager instance.');
+            throw new Error('There is already a valid AppManager instance');
         }
 
-        if (rlStorage instanceof AppStorage) {
-            this.storage = rlStorage;
+        if (metadataStorage instanceof AppMetadataStorage) {
+            this.appMetadataStorage = metadataStorage;
         } else {
-            throw new Error('Invalid instance of the AppStorage.');
+            throw new Error('Invalid instance of the AppMetadataStorage');
         }
 
         if (logStorage instanceof AppLogStorage) {
             this.logStorage = logStorage;
         } else {
-            throw new Error('Invalid instance of the AppLogStorage.');
+            throw new Error('Invalid instance of the AppLogStorage');
         }
 
-        if (rlBridges instanceof AppBridges) {
-            this.bridges = rlBridges;
+        if (bridges instanceof AppBridges) {
+            this.bridges = bridges;
         } else {
             throw new Error('Invalid instance of the AppBridges');
+        }
+
+        if (sourceStorage instanceof AppSourceStorage) {
+            this.appSourceStorage = sourceStorage;
+        } else {
+            throw new Error('Invalid instance of the AppSourceStorage');
         }
 
         this.apps = new Map<string, ProxiedApp>();
@@ -93,8 +109,8 @@ export class AppManager {
     }
 
     /** Gets the instance of the storage connector. */
-    public getStorage(): AppStorage {
-        return this.storage;
+    public getStorage(): AppMetadataStorage {
+        return this.appMetadataStorage;
     }
 
     /** Gets the instance of the log storage connector. */
@@ -172,17 +188,19 @@ export class AppManager {
             return;
         }
 
-        const items: Map<string, IAppStorageItem> = await this.storage.retrieveAll();
+        const items: Map<string, IAppStorageItem> = await this.appMetadataStorage.retrieveAll();
         const affs: Array<AppFabricationFulfillment> = new Array<AppFabricationFulfillment>();
 
         for (const item of items.values()) {
             const aff = new AppFabricationFulfillment();
+            const appPackage = await this.appSourceStorage.fetch(item);
+            const appItem = { ...item, compiled: await this.getCompiledFromAppPackage(appPackage), zip: appPackage.toString('base64') };
 
             try {
                 aff.setAppInfo(item.info);
                 aff.setImplementedInterfaces(item.implemented);
 
-                const app = this.getCompiler().toSandBox(this, item);
+                const app = this.getCompiler().toSandBox(this, appItem);
                 this.apps.set(item.id, app);
                 aff.setApp(app);
             } catch (e) {
@@ -345,7 +363,7 @@ export class AppManager {
             throw new Error('The App had compiler errors, can not enable it.');
         }
 
-        const storageItem = await this.storage.retrieveOne(id);
+        const storageItem = await this.appMetadataStorage.retrieveOne(id);
         if (!storageItem) {
             throw new Error(`Could not enable an App with the id of "${ id }" as it doesn't exist.`);
         }
@@ -355,7 +373,7 @@ export class AppManager {
             storageItem.status = rl.getStatus();
             // This is async, but we don't care since it only updates in the database
             // and it should not mutate any properties we care about
-            await this.storage.update(storageItem).catch();
+            await this.appMetadataStorage.update(storageItem).catch();
         }
 
         return isSetup;
@@ -387,7 +405,7 @@ export class AppManager {
 
         await app.setStatus(status, silent);
 
-        const storageItem = await this.storage.retrieveOne(id);
+        const storageItem = await this.appMetadataStorage.retrieveOne(id);
 
         app.getStorageItem().marketplaceInfo = storageItem.marketplaceInfo;
         await app.validateLicense().catch();
@@ -395,7 +413,7 @@ export class AppManager {
         // This is async, but we don't care since it only updates in the database
         // and it should not mutate any properties we care about
         storageItem.status = app.getStatus();
-        await this.storage.update(storageItem).catch();
+        await this.appMetadataStorage.update(storageItem).catch();
 
         return true;
     }
@@ -442,7 +460,9 @@ export class AppManager {
             return aff;
         }
 
-        const created = await this.storage.create(compiled);
+        const appMetadataItem = Utilities.omit(compiled, ['zip', 'compiled']) as IAppStorageItem;
+        // TODO: append `path` to appMetadataItem here
+        const created = await this.appMetadataStorage.create(appMetadataItem);
 
         if (!created) {
             aff.setStorageError('Failed to create the App, the storage did not return it.');
@@ -451,6 +471,8 @@ export class AppManager {
 
             return aff;
         }
+
+        await this.appSourceStorage.store(created, appPackage);
 
         this.apps.set(app.getID(), app);
         aff.setApp(app);
@@ -512,7 +534,7 @@ export class AppManager {
         this.accessorManager.purifyApp(app.getID());
         await this.removeAppUser(app);
         await (this.bridges.getPersistenceBridge() as IInternalPersistenceBridge & PersistenceBridge).purge(app.getID());
-        await this.storage.remove(app.getID());
+        await this.appMetadataStorage.remove(app.getID());
         await this.schedulerManager.cleanUp(app.getID());
 
         this.apps.delete(app.getID());
@@ -525,7 +547,7 @@ export class AppManager {
         aff.setAppInfo(result.info);
         aff.setImplementedInterfaces(result.implemented.getValues());
 
-        const old = await this.storage.retrieveOne(result.info.id);
+        const old = await this.appMetadataStorage.retrieveOne(result.info.id);
 
         if (!old) {
             throw new Error('Can not update an App that does not currently exist.');
@@ -535,26 +557,23 @@ export class AppManager {
 
         // TODO: We could show what new interfaces have been added
 
-        const stored = await this.storage.update({
+        const stored = await this.appMetadataStorage.update({
             createdAt: old.createdAt,
             id: result.info.id,
             info: result.info,
             status: this.apps.get(old.id).getStatus(),
-            zip: appPackage.toString('base64'),
-            compiled: Object.entries(result.files).reduce(
-                (files, [key, value]) => (files[key.replace(/\./gi, '$')] = value, files),
-                {} as {[key: string]: string},
-            ),
             languageContent: result.languageContent,
             settings: old.settings,
             implemented: result.implemented.getValues(),
             marketplaceInfo: old.marketplaceInfo,
             permissionsGranted,
+            sourcePath: '', // TODO: shiqi.mei append real path here
         });
 
         // Now that is has all been compiled, let's get the
         // the App instance from the source.
-        const app = this.getCompiler().toSandBox(this, stored);
+        const appItem = { ...stored, compiled: await this.getCompiledFromAppPackage(appPackage), zip: appPackage.toString('base64') };
+        const app = this.getCompiler().toSandBox(this, appItem);
 
         // Ensure there is an user for the app
         try {
@@ -649,7 +668,7 @@ export class AppManager {
 
             appStorageItem.marketplaceInfo.subscriptionInfo = appInfo.subscriptionInfo;
 
-            return this.storage.update(appStorageItem);
+            return this.appMetadataStorage.update(appStorageItem);
         })).catch();
 
         const queue = [] as Array<Promise<void>>;
@@ -682,7 +701,7 @@ export class AppManager {
                 const storageItem = app.getStorageItem();
                 storageItem.status = app.getStatus();
 
-                return this.storage.update(storageItem).catch(console.error) as Promise<void>;
+                return this.appMetadataStorage.update(storageItem).catch(console.error) as Promise<void>;
             }),
         ));
 
@@ -699,13 +718,15 @@ export class AppManager {
             return this.apps.get(appId);
         }
 
-        const item: IAppStorageItem = await this.storage.retrieveOne(appId);
+        const item: IAppStorageItem = await this.appMetadataStorage.retrieveOne(appId);
+        const appPackage = await this.appSourceStorage.fetch(item);
+        const appItem = { ...item, compiled: await this.getCompiledFromAppPackage(appPackage), zip: appPackage.toString('base64') };
 
         if (!item) {
             throw new Error(`No App found by the id of: "${ appId }"`);
         }
 
-        this.apps.set(item.id, this.getCompiler().toSandBox(this, item));
+        this.apps.set(item.id, this.getCompiler().toSandBox(this, appItem));
 
         const rl = this.apps.get(item.id);
         await this.initializeApp(item, rl, false);
@@ -800,7 +821,7 @@ export class AppManager {
             // This is async, but we don't care since it only updates in the database
             // and it should not mutate any properties we care about
             storageItem.status = app.getStatus();
-            await this.storage.update(storageItem).catch();
+            await this.appMetadataStorage.update(storageItem).catch();
         }
 
         return result;
@@ -875,7 +896,7 @@ export class AppManager {
             storageItem.status = app.getStatus();
             // This is async, but we don't care since it only updates in the database
             // and it should not mutate any properties we care about
-            await this.storage.update(storageItem).catch();
+            await this.appMetadataStorage.update(storageItem).catch();
         }
 
         return enable;
@@ -950,6 +971,15 @@ export class AppManager {
         }
 
         return result;
+    }
+
+    private async  getCompiledFromAppPackage(appPackage: Buffer): Promise<IAppSourceItem['compiled']> {
+        const result = await this.getParser().unpackageApp(appPackage);
+
+        return Object.entries(result.files).reduce(
+            (files, [key, value]) => (files[key.replace(/\./gi, '$')] = value, files),
+            {} as { [key: string]: string },
+        );
     }
 }
 
